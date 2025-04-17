@@ -1,6 +1,7 @@
 /*
  *  Hamlib Kachina backend - main header
- *  Copyright (c) 2001-2004 by Stephane Fillod
+ *  Copyright (c) 2001-2004 by Stephane Fillod 
+ *  Copyright (c) 2025 by William Bennett, Bill Bennett N7DZ, bill@wizardofaz.net
  *
  *
  *   This library is free software; you can redistribute it and/or
@@ -24,11 +25,13 @@
 
 #include <hamlib/rig.h>
 
-#define BACKEND_VER "20240420"
+#define BACKEND_VER "20250413"
 
 int kachina_set_freq(RIG *rig, vfo_t vfo, freq_t freq);
 int kachina_set_mode(RIG *rig, vfo_t vfo, rmode_t mode, pbwidth_t width);
 int kachina_set_ptt(RIG *rig, vfo_t vfo, ptt_t ptt);
+int kachina_get_freq(RIG *rig, vfo_t vfo, freq_t *freq);
+int kachina_get_mode(RIG *rig, vfo_t vfo, rmode_t *mode, pbwidth_t *width);
 int kachina_get_level(RIG *rig, vfo_t vfo, setting_t level, value_t *val);
 
 extern struct rig_caps k505dsp_caps;

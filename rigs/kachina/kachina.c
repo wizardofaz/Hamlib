@@ -1,6 +1,7 @@
 /*
  *  Hamlib Kachina backend - main file
  *  Copyright (c) 2001-2004 by Stephane Fillod
+ *  Copyright (c) 2025 by William Bennett, Bill Bennett N7DZ, bill@wizardofaz.net
  *
  *
  *   This library is free software; you can redistribute it and/or
@@ -19,9 +20,13 @@
  *
  */
 
+
+// TODO: send keepalive every 15 sec? Maybe something at higher level already doing that...
+// TODO: reconcile proper use of RIG_ error returns
+
 #include <string.h>  /* String function definitions */
 
-#include "hamlib/rig.h"
+#include <hamlib/rig.h>
 #include "serial.h"
 #include "register.h"
 
@@ -33,8 +38,9 @@
  */
 #define STX     0x02
 #define ETX     0x03
-#define GDCMD   0xff
+#define STD     0xfd
 #define ERRCMD  0xfe
+#define GDCMD   0xff
 
 /*
  * modes in use by the "M" command
@@ -60,36 +66,88 @@
  * kachina_transaction
  * We assume that rig!=NULL, STATE(rig)!= NULL
  * Otherwise, you'll get a nice seg fault. You've been warned!
+ * When response_len == 0 no response is expected; else return the response.
  * TODO: error case handling
  */
-static int kachina_transaction(RIG *rig, unsigned char cmd1, unsigned char cmd2)
+static int kachina_transaction(RIG *rig, unsigned char cmd1, unsigned char cmd2, 
+    int response_len, unsigned char *response, unsigned int chksum_flag)
 {
-    int count, retval;
+    int count, read_count = 0, buf_index, retval;
     hamlib_port_t *rp = RIGPORT(rig);
-    unsigned char buf4[4];
+    unsigned char buf[512];
+    unsigned char hex_buf[3*sizeof(buf)+1];
+    unsigned int chksum;
 
-    buf4[0] = STX;
-    buf4[1] = cmd1;
-    buf4[2] = cmd2;
-    buf4[3] = ETX;
+    if (response_len > 500){ 
+        rig_debug(RIG_DEBUG_BUG,"%s: can't handle long responses\n", __func__);
+        return -RIG_EINTERNAL; // FIXME: what is the correct code here?
+    }
 
+    buf[0] = STX;
+    buf[1] = cmd1;
+    buf[2] = cmd2;
+    buf[3] = ETX;
+
+    rig_debug(RIG_DEBUG_VERBOSE, "%s: flushing telemetry before sending command\n", __func__);
     rig_flush(rp);
 
-    retval = write_block(rp, buf4, 4);
+    retval = write_block(rp, buf, 4);
 
     if (retval != RIG_OK)
     {
         return retval;
     }
 
-    count = read_string(rp, buf4, 1, "", 0, 0, 1);
-
-    if (count != 1)
-    {
-        return count;
+    // Flush up to GDCMD then read from there
+    hex_buf[0] = '\0';
+    for (buf_index = 0; buf_index < sizeof(buf); buf_index++) {
+        //count = read_string(rp, buf+buf_index, sizeof(buf)-buf_index, "", 0, 0, 1);
+        count = read_block(rp, buf+buf_index, 1);
+        if (count != 1) return -RIG_EIO;
+        sprintf((char *)(hex_buf+3*buf_index), "%02x ", buf[buf_index]);
+        if (buf[buf_index] == GDCMD) break;
     }
 
-    return (buf4[0] == GDCMD) ? RIG_OK : -RIG_EPROTO;
+    // FIXME: sometimes see FB in the flushed stream, not documented, what is it?
+    if (buf_index == sizeof(buf)) {
+        rig_debug(RIG_DEBUG_ERR, "%s: flushed %d bytes without finding GDCMD\n", __func__, buf_index);
+        return -RIG_EPROTO;
+    } else {
+        rig_debug(RIG_DEBUG_VERBOSE, "%s: flushed (maybe) more telemetry until get GDCMD: %s\n", __func__, hex_buf);
+    }
+
+    if (response_len != 0) {
+        // After GDCMD we should get STD then the response and maybe a chksum
+        read_count = response_len + 1;
+        if (chksum_flag) read_count +=2;
+        // looks like the flush_flag has no real function (??), just gates a debug message
+        //count = read_string(rp, buf+1, sizeof(buf)-1, "", 0, 0, read_count);
+        count = read_block(rp, buf, read_count);
+    
+        if (count != read_count)
+        {
+            return -RIG_EPROTO; 
+        }
+    }
+
+    if(buf[0] != STD) {
+        return -RIG_EPROTO;
+    }
+
+    if (chksum_flag) {
+        chksum = 0;
+        for (buf_index = 0; buf_index<response_len; buf_index++) chksum += buf[buf_index+1];
+        chksum &= 0xffff;
+        if (chksum != (buf[response_len+1]<<8) + buf[response_len+2]) {
+            rig_debug(RIG_DEBUG_ERR, "%s bad chksum %d s/b %d\n", __func__, 
+                chksum, (buf[response_len+1]<<8) + buf[response_len+2]);
+            return -RIG_EPROTO;
+        }
+    }
+
+    memcpy(response, buf+1, response_len);
+    rig_debug(RIG_DEBUG_VERBOSE, "%s: ALL OK\n", __func__);
+    return RIG_OK;
 }
 
 static int kachina_trans_n(RIG *rig, unsigned char cmd1, const char *data,
@@ -148,6 +206,24 @@ static void freq2dds(freq_t freq, int ant_port, unsigned char fbuf[4])
 }
 
 /*
+ * convert a DDS frequency from the Kachina to 
+ * a frequency in Hz in the range of 30kHz to 30MHz.
+ */
+static void dds2freq(freq_t *freq, unsigned int *ant_port, unsigned char *fbuf)
+{
+    double dds;
+    unsigned long dds_ulong;
+
+    *ant_port = fbuf[0] & 0xc0;
+    fbuf[0] &= 0x3f;
+
+    dds_ulong = (fbuf[0]<<24) + (fbuf[1]<<16) + (fbuf[2]<<8) + fbuf[3];
+    dds = ((double) dds_ulong) / DDS_CONST - DDS_BASE + 0.5;
+
+    *freq = (freq_t)dds;
+}
+
+/*
  * kachina_set_freq
  * Assumes rig!=NULL
  */
@@ -192,6 +268,8 @@ int kachina_set_mode(RIG *rig, vfo_t vfo, rmode_t mode, pbwidth_t width)
     int retval;
     unsigned char k_mode;
 
+    // TODO: also set bandwidth here?
+
     switch (mode)
     {
     case RIG_MODE_CW:       k_mode = M_CW; break;
@@ -211,7 +289,7 @@ int kachina_set_mode(RIG *rig, vfo_t vfo, rmode_t mode, pbwidth_t width)
         return -RIG_EINVAL;
     }
 
-    retval = kachina_transaction(rig, 'M', k_mode);
+    retval = kachina_transaction(rig, 'M', k_mode, 0, NULL, 0);
 
     if (retval != RIG_OK)
     {
@@ -283,6 +361,67 @@ int kachina_get_level(RIG *rig, vfo_t vfo, setting_t level, value_t *val)
     val->i = buf[i];
 
     return RIG_OK;
+}
+
+
+/*
+ * kachina_get_freq
+ * Assumes rig!=NULL
+ */
+int kachina_get_freq(RIG *rig, vfo_t vfo, freq_t *freq)
+{
+    int retval;
+    unsigned char buf[4];
+    unsigned int port; 
+
+    retval = kachina_transaction(rig, 'b', 0x37, 4, buf, 1);
+    if (retval != RIG_OK) return retval;
+
+    dds2freq(freq, &port, buf);
+    rig_debug(RIG_DEBUG_VERBOSE, "kachina_get_freq: %ld\n", (long)*freq);
+ 
+    return retval;
+}
+
+
+/*
+ * kachina_get_mode
+ * Assumes rig!=NULL
+ *
+ */
+int kachina_get_mode(RIG *rig, vfo_t vfo, rmode_t *mode, pbwidth_t *width)
+{
+    int retval;
+    unsigned char k_mode;
+
+    retval = kachina_transaction(rig, 'b', 0x38, 1, &k_mode, 0);
+    if (retval != RIG_OK) return retval;
+
+    switch (k_mode)
+    {
+        case M_CW:      *mode = RIG_MODE_CW; break;
+
+        case M_USB:     *mode = RIG_MODE_USB; break;
+
+        case M_LSB:     *mode = RIG_MODE_LSB; break;
+
+        case M_AM:      *mode = RIG_MODE_AM; break;
+
+        case M_FM:      *mode = RIG_MODE_FM; break;
+
+        default:
+            rig_debug(RIG_DEBUG_ERR,
+                  "%s: unknown mode from Kachina: %02x\n",
+                  __func__, (char)k_mode);
+        return -RIG_EINVAL;
+    }
+
+    // FIXME: placeholder for now
+    *width = 500;
+    rig_debug(RIG_DEBUG_VERBOSE, "kachina_get_mode: %d (%d)\n", (int)*mode, (int)*width);
+    retval = RIG_OK;
+
+    return retval;
 }
 
 

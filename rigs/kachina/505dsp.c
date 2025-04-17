@@ -1,6 +1,7 @@
 /*
  *  Hamlib Kachina backend - 505DSP description
  *  Copyright (c) 2001-2004 by Stephane Fillod
+ *  Copyright (c) 2025 by William Bennett, Bill Bennett N7DZ, bill@wizardofaz.net
  *
  *
  *   This library is free software; you can redistribute it and/or
@@ -47,9 +48,8 @@
 /*
  * 505DSP rig capabilities.
  *
- * protocol is documented at
- *      http://www.kachina-az.com/develope.htm
- *
+ * protocol is documented in 
+ *    ./Kachina_505DSP_software_interface_user.pdf
  * TODO:
  *  - so many ...
  */
@@ -58,7 +58,7 @@ struct rig_caps k505dsp_caps =
     RIG_MODEL(RIG_MODEL_505DSP),
     .model_name = "505DSP",
     .mfg_name =  "Kachina",
-    .version =  BACKEND_VER ".0",
+    .version =  BACKEND_VER ".1",
     .copyright =  "LGPL",
     .status =  RIG_STATUS_STABLE,
     .rig_type =  RIG_TYPE_COMPUTER,
@@ -154,6 +154,8 @@ struct rig_caps k505dsp_caps =
     .set_ptt = kachina_set_ptt,
 
     .get_level =  kachina_get_level,
+    .get_freq =  kachina_get_freq,
+    .get_mode = kachina_get_mode,
     .hamlib_check_rig_caps = HAMLIB_CHECK_RIG_CAPS
 };
 
